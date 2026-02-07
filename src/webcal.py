@@ -100,13 +100,22 @@ class ICalParser:
         )
     
     def _parse_datetime(self, value: str) -> datetime:
-        """Parse iCal datetime format."""
-        # Handle different formats
-        # 20260224T090000
-        # 20260224T090000Z
-        # 20260224 (all-day)
+        """Parse iCal datetime format.
         
+        Handles formats:
+        - 20260224T090000 (local time)
+        - 20260224T090000Z (UTC)
+        - 20260224 (all-day)
+        - 2026-02-24T09:00:00 (ISO format, sometimes seen)
+        """
         value = value.strip()
+        
+        # Handle ISO format with hyphens and colons
+        if '-' in value and 'T' in value:
+            # 2026-02-24T09:00:00 or 2026-02-24T09:00:00-08:00
+            value = value.replace('-', '').replace(':', '')
+            if '+' in value:
+                value = value.split('+')[0]
         
         if 'T' in value:
             # Has time component
@@ -114,7 +123,12 @@ class ICalParser:
                 # UTC
                 return datetime.strptime(value, '%Y%m%dT%H%M%SZ')
             else:
-                # Local time
+                # Local time - may have timezone offset like -08:00
+                # Strip any timezone offset for now
+                if '+' in value or (value[-5:-4] == '-' and len(value) > 15):
+                    # Has timezone offset, strip it
+                    base_value = value[:15]  # YYYYMMDDTHHMMSS
+                    return datetime.strptime(base_value, '%Y%m%dT%H%M%S')
                 return datetime.strptime(value[:15], '%Y%m%dT%H%M%S')
         else:
             # All-day event, use start of day
@@ -255,17 +269,29 @@ class WebcalSync:
     
     def _event_to_task_data(self, calendar: Dict, event: ICalEvent) -> Dict[str, Any]:
         """Convert iCal event to personal_task data."""
-        # Determine if timed or all-day
-        if event.end and event.end.date() != event.start.date():
-            # Multi-day or all-day
-            task_type = 'untimed'
-            duration = None
-        elif event.end:
+        # Calculate duration from start and end
+        duration = None
+        task_type = 'untimed'
+        
+        if event.end and event.start:
+            duration_minutes = int((event.end - event.start).total_seconds() / 60)
+            
+            if duration_minutes <= 0:
+                # Same start/end time or invalid - default to 60 min for timed events
+                duration = 60
+                task_type = 'timed'
+            elif duration_minutes >= 1439:
+                # Multi-day (24+ hours) - treat as untimed/all-day
+                task_type = 'untimed'
+                duration = duration_minutes  # Still store actual duration
+            else:
+                # Normal timed event
+                task_type = 'timed'
+                duration = duration_minutes
+        elif event.start:
+            # No end time - default to 60 minutes
             task_type = 'timed'
-            duration = int((event.end - event.start).total_seconds() / 60)
-        else:
-            task_type = 'untimed'
-            duration = None
+            duration = 60
         
         # Build description
         description_parts = []
@@ -273,6 +299,16 @@ class WebcalSync:
             description_parts.append(event.description)
         if event.location:
             description_parts.append(f"Location: {event.location}")
+        
+        # Format duration for multi-day events
+        duration_display = ""
+        if duration and duration >= 1440:
+            days = duration // 1440
+            hours = (duration % 1440) // 60
+            duration_display = f"{days} days"
+            if hours > 0:
+                duration_display += f" {hours} hours"
+            description_parts.append(f"Duration: {duration_display}")
         
         return {
             'title': event.summary,
