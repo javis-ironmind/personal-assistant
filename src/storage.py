@@ -235,6 +235,122 @@ class TaskStorage:
                 WHERE id = %s
             """, (google_event_id, google_task_id, task_id))
     
+    # --- External Calendar Methods ---
+    
+    def add_external_calendar(self, name: str, url: str, **kwargs) -> Dict[str, Any]:
+        """Add a new external calendar source."""
+        with self._get_cursor() as cur:
+            cur.execute("""
+                INSERT INTO external_calendars 
+                (name, url, calendar_type, default_context, default_priority, 
+                 title_filter, description, sync_enabled)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (name) DO UPDATE SET
+                    url = EXCLUDED.url,
+                    updated_at = NOW()
+                RETURNING *
+            """, (
+                name, url, 
+                kwargs.get('calendar_type', 'webcal'),
+                kwargs.get('default_context'),
+                kwargs.get('default_priority'),
+                kwargs.get('title_filter'),
+                kwargs.get('description'),
+                kwargs.get('sync_enabled', True)
+            ))
+            return dict(cur.fetchone())
+    
+    def get_external_calendar(self, calendar_id: str) -> Optional[Dict[str, Any]]:
+        """Get external calendar by ID."""
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT * FROM external_calendars WHERE id = %s
+            """, (calendar_id,))
+            result = cur.fetchone()
+            return dict(result) if result else None
+    
+    def list_external_calendars(self, sync_enabled: bool = None) -> List[Dict[str, Any]]:
+        """List external calendars."""
+        with self._get_cursor() as cur:
+            if sync_enabled is not None:
+                cur.execute("""
+                    SELECT * FROM external_calendars 
+                    WHERE sync_enabled = %s
+                    ORDER BY name
+                """, (sync_enabled,))
+            else:
+                cur.execute("""
+                    SELECT * FROM external_calendars 
+                    ORDER BY name
+                """)
+            return [dict(row) for row in cur.fetchall()]
+    
+    def update_calendar_sync_status(self, calendar_id: str, 
+                                     status: str, error: Optional[str] = None):
+        """Update last sync status."""
+        with self._get_cursor() as cur:
+            cur.execute("""
+                UPDATE external_calendars 
+                SET last_synced_at = NOW(),
+                    last_sync_status = %s,
+                    last_sync_error = %s,
+                    updated_at = NOW()
+                WHERE id = %s
+            """, (status, error, calendar_id))
+    
+    # --- External Event Tracking ---
+    
+    def get_external_event(self, calendar_id: str, ical_uid: str) -> Optional[Dict[str, Any]]:
+        """Get external event by calendar and iCal UID."""
+        with self._get_cursor() as cur:
+            cur.execute("""
+                SELECT * FROM external_calendar_events
+                WHERE external_calendar_id = %s AND ical_uid = %s
+            """, (calendar_id, ical_uid))
+            result = cur.fetchone()
+            return dict(result) if result else None
+    
+    def create_external_event(self, calendar_id: str, personal_task_id: str,
+                               ical_uid: str, ical_hash: str, ical_sequence: int = 0):
+        """Track a synced external event."""
+        with self._get_cursor() as cur:
+            cur.execute("""
+                INSERT INTO external_calendar_events
+                (external_calendar_id, personal_task_id, ical_uid, ical_hash, ical_sequence)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (external_calendar_id, ical_uid) DO UPDATE SET
+                    personal_task_id = EXCLUDED.personal_task_id,
+                    ical_hash = EXCLUDED.ical_hash,
+                    ical_sequence = EXCLUDED.ical_sequence,
+                    last_synced_at = NOW(),
+                    sync_status = 'updated'
+                RETURNING id
+            """, (calendar_id, personal_task_id, ical_uid, ical_hash, ical_sequence))
+            return cur.fetchone()['id']
+    
+    def update_external_event(self, calendar_id: str, ical_uid: str,
+                               ical_hash: Optional[str] = None,
+                               ical_sequence: Optional[int] = None):
+        """Update external event tracking."""
+        with self._get_cursor() as cur:
+            updates = ['last_synced_at = NOW()']
+            params = []
+            
+            if ical_hash:
+                updates.append('ical_hash = %s')
+                params.append(ical_hash)
+            if ical_sequence is not None:
+                updates.append('ical_sequence = %s')
+                params.append(ical_sequence)
+            
+            params.extend([calendar_id, ical_uid])
+            
+            cur.execute(f"""
+                UPDATE external_calendar_events 
+                SET {', '.join(updates)}
+                WHERE external_calendar_id = %s AND ical_uid = %s
+            """, params)
+    
     def get_weekly_completed(self, since: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """Get tasks completed this week."""
         if since is None:
